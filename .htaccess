@@ -1,0 +1,8 @@
+# Redirect all requests to Laravel's /public folder
+RewriteEngine On
+
+# If the request is NOT already for /public
+RewriteCond %{REQUEST_URI} !^/public/
+
+# Internally rewrite all requests to /public/
+RewriteRule ^(.*)$ public/$1 [L,QSA]
