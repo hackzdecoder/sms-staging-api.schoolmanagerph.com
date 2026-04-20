@@ -1,11 +1,12 @@
-# Redirect all requests to Laravel's /public folder
+<IfModule mod_rewrite.c>
+    RewriteEngine On
 
-RewriteEngine On
+    # Block ALL URLs that contain /public/ anywhere
+    RewriteCond %{THE_REQUEST} /public/ [NC]
+    RewriteRule ^ - [F,L]
 
-# If the request is NOT already for /public
+    # Redirect everything else to public folder
+    RewriteCond %{REQUEST_URI} !^/public/
+    RewriteRule ^(.*)$ public/$1 [L,QSA]
 
-RewriteCond %{REQUEST_URI} !^/public/
-
-# Internally rewrite all requests to /public/
-
-RewriteRule ^(.\*)$ public/$1 [L,QSA]
+</IfModule>
