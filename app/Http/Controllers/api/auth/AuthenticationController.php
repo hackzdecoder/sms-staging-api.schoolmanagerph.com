@@ -429,20 +429,20 @@ class AuthenticationController extends Controller
     }
 
     // Verify email is not already taken by another user
-    // $emailAlreadyExists = $usersMainConnection
-    //   ->table('users')
-    //   ->where('email', $request->email)
-    //   ->where('user_id', '!=', $userToUpdate->user_id)
-    //   ->exists();
+    $emailAlreadyExists = $usersMainConnection
+      ->table('users')
+      ->where('email', $request->email)
+      ->where('user_id', '!=', $userToUpdate->user_id)
+      ->exists();
 
-    // if ($emailAlreadyExists) {
-    //   DatabaseManager::disconnect('users_main');
-    //   return response()->json([
-    //     'success' => false,
-    //     'message' => 'Invalid email, Please try another email',
-    //     'errors' => ['email' => ['Invalid email, Please try another email']],
-    //   ], 422);
-    // }
+    if ($emailAlreadyExists) {
+      DatabaseManager::disconnect('users_main');
+      return response()->json([
+        'success' => false,
+        'message' => 'Invalid email, Please try another email',
+        'errors' => ['email' => ['Invalid email, Please try another email']],
+      ], 422);
+    }
 
     // Prepare update data
     $updatePayload = [
