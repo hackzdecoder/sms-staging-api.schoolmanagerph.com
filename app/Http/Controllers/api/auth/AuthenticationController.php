@@ -58,6 +58,33 @@ class AuthenticationController extends Controller
   }
 
   /**
+   * Get user email by username (for pre-filling first-user form)
+   */
+  public function getUserEmailByUsername(Request $request)
+  {
+    $validator = Validator::make($request->all(), [
+      'username' => 'required|string|exists:users,username',
+    ]);
+
+    if ($validator->fails()) {
+      return response()->json([
+        'success' => false,
+        'message' => 'Username not found.',
+      ], 404);
+    }
+
+    $user = User::where('username', $request->username)->first();
+
+    return response()->json([
+      'success' => true,
+      'data' => [
+        'email' => $user->email ?? '',
+        'has_email' => !empty($user->email),
+      ],
+    ], 200);
+  }
+
+  /**
    * Authenticate user and return JWT token
    * 
    * @param Request $request Contains username and password
