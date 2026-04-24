@@ -10,71 +10,79 @@ use Illuminate\Support\Facades\DB;
 
 class StudentProfileController extends Controller
 {
-    public function getStudentProfile(Request $request)
-    {
-        try {
-            $user = Auth::user();
-            
-            if (!$user) {
-                return response()->json(['success' => false, 'message' => 'Unauthenticated'], 401);
-            }
+  public function getStudentProfile(Request $request)
+  {
+    try {
+      $user = Auth::user();
 
-            $userId = $user->user_id;
-            
-            // DYNAMIC CONNECTION: DatabaseManager auto-detects school
-            $schoolDb = DatabaseManager::connect();
-            $student = $schoolDb
-                ->table('student_records')
-                ->where('user_id', $userId)
-                ->first();
-            
-            // Disconnect
-            DatabaseManager::disconnect();
+      if (!$user) {
+        return response()->json(['success' => false, 'message' => 'Unauthenticated'], 401);
+      }
 
-            if (!$student) {
-                return response()->json(['success' => false, 'message' => 'Student record not found'], 404);
-            }
+      $userId = $user->user_id;
+      // ✅ Get school_code from authenticated user and convert to uppercase
+      $schoolCode = strtoupper($user->school_code ?? '');
 
-            // This stays the same - users_main is still static
-            $userData = DB::connection('users_main')
-                ->table('users')
-                ->where('user_id', $userId)
-                ->select('email', 'account_status', 'fullname', 'school_code', 'gs_access_status')
-                ->first();
+      if (!$schoolCode) {
+        return response()->json(['success' => false, 'message' => 'School code not found'], 400);
+      }
 
-            // TEMPORARY: Hardcode for testing
-            // $profileImage = '/storage/profile-img/user-avatar.jpg';
-            
-            // OR use database value if exists
-            $profileImage = !empty($student->profile_img) ? '/storage/' . $student->profile_img : '/storage/profile-img/user-avatar.jpg';
+      // Get user data from users_main
+      $userData = DB::connection('users_main')
+        ->table('users')
+        ->where('user_id', $userId)
+        ->where('school_code', $schoolCode)
+        ->first();
 
-            $profileData = [
-                'student_id' => $student->student_id ?? '',
-                'fullname' => $student->fullname ?? ($userData->fullname ?? ''),
-                'nickname' => $student->nickname ?? '',
-                'foreign_name' => $student->foreign_name ?? '',
-                'gender' => $student->gender ?? '',
-                'course' => $student->course ?? '',
-                'level' => $student->level ?? '',
-                'section' => $student->section ?? '',
-                'email' => $student->email ?? ($userData->email ?? ''),
-                'mobile_number' => $student->mobile_number ?? '',
-                'lrn' => $student->lrn ?? '',
-                'profile_img' => $profileImage,
-                'account_status' => $userData->account_status ?? '',
-                'school_code' => $userData->school_code ?? '',
-                'school_name' => $student->school_name ?? '', // ADD THIS LINE
-                'gs_access_status' => $userData->gs_access_status ?? '',
-                'school_level' => $student->school_level ?? '',
-            ];
+      if (!$userData) {
+        return response()->json([
+          'success' => false,
+          'message' => 'User not found for this school.',
+        ], 404);
+      }
 
-            return response()->json(['success' => true, 'data' => $profileData]);
+      // Connect to school database
+      $databaseName = DatabaseManager::generateDatabaseName($schoolCode);
+      $schoolDb = DatabaseManager::connect($databaseName);
 
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false, 
-                'message' => 'Failed to fetch student profile: ' . $e->getMessage()
-            ], 500);
-        }
+      // Query student_records
+      $student = $schoolDb
+        ->table('student_records')
+        ->where('user_id', $userId)
+        ->where('school_code', $schoolCode)
+        ->first();
+
+      DatabaseManager::disconnect($databaseName);
+
+      $profileImage = !empty($student->profile_img) ? '/storage/' . $student->profile_img : '/storage/profile-img/user-avatar.jpg';
+
+      $profileData = [
+        'student_id' => $student->student_id ?? '',
+        'fullname' => $student->fullname ?? $userData->fullname ?? $userData->username ?? '',
+        'nickname' => $student->nickname ?? $userData->nickname ?? '',
+        'foreign_name' => $student->foreign_name ?? '',
+        'gender' => $student->gender ?? '',
+        'course' => $student->course ?? '',
+        'level' => $student->level ?? '',
+        'section' => $student->section ?? '',
+        'email' => $student->email ?? $userData->email ?? '',
+        'mobile_number' => $student->mobile_number ?? '',
+        'lrn' => $student->lrn ?? '',
+        'profile_img' => $profileImage,
+        'account_status' => $userData->account_status ?? '',
+        'school_code' => $schoolCode,
+        'school_name' => $student->school_name ?? '',
+        'gs_access_status' => $userData->gs_access_status ?? '',
+        'school_level' => $student->school_level ?? '',
+      ];
+
+      return response()->json(['success' => true, 'data' => $profileData]);
+
+    } catch (\Exception $e) {
+      return response()->json([
+        'success' => false,
+        'message' => 'Failed to fetch student profile: ' . $e->getMessage()
+      ], 500);
     }
+  }
 }

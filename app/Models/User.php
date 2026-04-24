@@ -15,7 +15,7 @@ class User extends Authenticatable
   protected $connection = 'users_main';
 
   // Set primary key
-  protected $primaryKey = 'user_id';
+  protected $primaryKey = 'id';
 
   // If user_id is not auto-increment
   public $incrementing = false;
@@ -24,6 +24,7 @@ class User extends Authenticatable
   protected $keyType = 'bigint';
 
   protected $fillable = [
+    'id',
     'user_id',
     'username',
     'email',

@@ -69,19 +69,81 @@ class OtpController extends Controller
   private function getCompanyName(): string
   {
     try {
-      // FIXED: Use DB::connection('trademarks') instead of DatabaseManager::connectSpecial()
       $company = DB::connection('trademarks')
         ->table('companies')
         ->select('company_name')
         ->first();
 
-      // REMOVED: DatabaseManager::disconnect('special_trademarks');
-
       return $company->company_name;
     } catch (\Exception $e) {
-      // Log error if needed
-      return 'TaparSoft Enterprise'; // Default fallback
+      return 'TaparSoft Enterprise';
     }
+  }
+
+  /**
+   * Get user's full name from student_records
+   */
+  private function getUserFullName($user): string
+  {
+    // Default fallback to username
+    $fullName = $user->username;
+
+    // Get school code from user record
+    $schoolCode = $user->school_code ?? null;
+
+    // If no school code in database, extract from username or user_id
+    if (!$schoolCode) {
+      // Pattern: schoolcode_username (e.g., wlkae_sagara_kyosuke)
+      if (preg_match('/^([a-z]{2,5})_/i', $user->username ?? '', $schoolCodeMatches)) {
+        $schoolCode = strtolower($schoolCodeMatches[1]);
+      }
+      // Alternative: Extract from beginning of user_id
+      else if (preg_match('/^([a-z]{2,5})/i', $user->user_id ?? '', $schoolCodeMatches)) {
+        $schoolCode = strtolower($schoolCodeMatches[1]);
+      }
+    } else {
+      $schoolCode = strtolower(trim($schoolCode));
+    }
+
+    // If school code is found, try to fetch student profile
+    if ($schoolCode) {
+      try {
+        // Generate appropriate database name based on environment
+        $targetDatabaseName = DatabaseManager::generateDatabaseName($schoolCode);
+
+        // Connect to the school-specific database
+        $schoolDatabaseConnection = DatabaseManager::connect($targetDatabaseName);
+
+        // Retrieve student record including fullname
+        $studentProfile = $schoolDatabaseConnection
+          ->table('student_records')
+          ->where('user_id', $user->user_id)
+          ->first();
+
+        // If student record exists, extract the full name
+        if ($studentProfile) {
+          // Try multiple possible column names for full name
+          if (isset($studentProfile->fullname) && !empty($studentProfile->fullname)) {
+            $fullName = $studentProfile->fullname;
+          } elseif (isset($studentProfile->full_name) && !empty($studentProfile->full_name)) {
+            $fullName = $studentProfile->full_name;
+          } elseif (isset($studentProfile->name) && !empty($studentProfile->name)) {
+            $fullName = $studentProfile->name;
+          } elseif (isset($studentProfile->student_name) && !empty($studentProfile->student_name)) {
+            $fullName = $studentProfile->student_name;
+          }
+        }
+
+        // Clean up database connection
+        DatabaseManager::disconnect($targetDatabaseName);
+
+      } catch (\Exception $e) {
+        // Keep the default username fallback
+        $fullName = $user->username;
+      }
+    }
+
+    return $fullName;
   }
 
   /**
@@ -137,16 +199,14 @@ class OtpController extends Controller
       ], 403);
     }
 
-    // ✅ DETECT FLOW: Check if user already has email
+    // DETECT FLOW: Check if user already has email
     $isFirstUserFlow = empty($user->email) || $user->email_verified_at === null;
     $resetToken = null;
 
-    // In verifyOtp method for first-user flow:
     if ($isFirstUserFlow) {
-      // ✅ FIRST-USER REGISTRATION FLOW
-      // Generate token AFTER OTP verification
+      // FIRST-USER REGISTRATION FLOW
       $firstUserToken = Str::random(60);
-      $tokenExpiry = Carbon::now()->addMinutes(15); // ✅ Store expiry
+      $tokenExpiry = Carbon::now()->addMinutes(15);
 
       DB::table('users')
         ->where('id', $user->id)
@@ -167,13 +227,12 @@ class OtpController extends Controller
           'username' => $user->username,
           'email' => $user->email,
           'email_hint' => substr($user->email, 0, 3) . '****' . strstr($user->email, '@'),
-          'first_user_token' => $firstUserToken, // ✅ RETURN TOKEN
-          'first_user_token_expiry_at' => $tokenExpiry->toDateTimeString(), // ✅ ADD THIS LINE
+          'first_user_token' => $firstUserToken,
+          'first_user_token_expiry_at' => $tokenExpiry->toDateTimeString(),
         ],
       ], 200);
     } else {
-      // ✅ PASSWORD RESET FLOW
-      // Generate reset token
+      // PASSWORD RESET FLOW
       $resetToken = Str::random(60);
 
       DB::table('users')
@@ -194,14 +253,14 @@ class OtpController extends Controller
         'data' => [
           'username' => $user->username,
           'email_hint' => substr($user->email, 0, 3) . '****' . strstr($user->email, '@'),
-          'reset_token' => $resetToken, // ✅ CRITICAL: Return reset_token
+          'reset_token' => $resetToken,
         ],
       ], 200);
     }
   }
 
   /**
-   * Send OTP for first-user email registration (NEW METHOD)
+   * Send OTP for first-user email registration
    */
   public function sendOtpFirstUser(Request $request)
   {
@@ -241,7 +300,7 @@ class OtpController extends Controller
       ], 403);
     }
 
-    // ✅ CHANGED: Check if email already exists (for other users)
+    // Check if email already exists for other users
     $emailExists = User::where('email', $request->email)
       ->where('username', '!=', $request->username)
       ->exists();
@@ -255,8 +314,7 @@ class OtpController extends Controller
       ], 422);
     }
 
-    // ✅ CHANGED: Temporarily update email for OTP sending
-    // Store original email if exists, otherwise use new email
+    // Temporarily update email for OTP sending
     $originalEmail = $user->email;
     $tempEmail = $request->email;
 
@@ -277,9 +335,12 @@ class OtpController extends Controller
     // Get company name from trademarks database
     $companyName = $this->getCompanyName();
 
-    // ✅ CHANGED: Email content for REGISTRATION (not password reset)
+    // Get user's full name
+    $fullName = $this->getUserFullName($user);
+
+    // Email content for REGISTRATION with full name
     $otpBody = <<<TXT
-            Hello {$user->username},
+            Hello {$fullName},
 
             Your One-Time Password (OTP) for Email Registration is: {$newOtp}
 
@@ -294,12 +355,12 @@ class OtpController extends Controller
           ->subject('Email Registration OTP');
       });
 
-      // ✅ Restore original email after sending (if it was empty)
+      // Restore original email after sending (if it was empty)
       if (empty($originalEmail)) {
         DB::table('users')
           ->where('id', $user->id)
           ->update([
-            'email' => null, // Will be set later in update-first-user
+            'email' => null,
             'updated_at' => DB::raw('updated_at'),
           ]);
       }
@@ -382,8 +443,11 @@ class OtpController extends Controller
     // Get company name from trademarks database
     $companyName = $this->getCompanyName();
 
+    // Get user's full name
+    $fullName = $this->getUserFullName($user);
+
     $otpBody = <<<TXT
-            Hello {$user->username},
+            Hello {$fullName},
 
             Your new OTP code is: {$newOtp}
 

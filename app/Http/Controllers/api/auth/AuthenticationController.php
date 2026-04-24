@@ -63,22 +63,70 @@ class AuthenticationController extends Controller
   public function getUserEmailByUsername(Request $request)
   {
     $validator = Validator::make($request->all(), [
-      'username' => 'required|string|exists:users,username',
+      'username' => 'required|string',
+      'school_code' => 'required|string',
     ]);
 
     if ($validator->fails()) {
       return response()->json([
         'success' => false,
-        'message' => 'Username not found.',
+        'message' => 'Username and school code are required.',
+      ], 422);
+    }
+
+    $username = $request->username;
+    $schoolCode = strtoupper($request->school_code);
+
+    // ✅ EXACT QUERY: SELECT FROM users_main WITH school_code filter
+    $user = DB::connection('users_main')
+      ->table('users')
+      ->where('username', $username)
+      ->where('school_code', $schoolCode)
+      ->first();
+
+    if (!$user) {
+      return response()->json([
+        'success' => false,
+        'message' => 'User not found for this school.',
       ], 404);
     }
 
-    $user = User::where('username', $request->username)->first();
+    // ✅ EXACT QUERY: LEFT JOIN school database based on school_code
+    $studentFullname = null;
+    $studentSchoolName = null;
 
+    try {
+      // Determine which school database to join based on school_code
+      // ATHENEUM -> sm_atheneum_dev
+      // SVA -> sm_sva_dev
+      $databaseName = DatabaseManager::generateDatabaseName($schoolCode);
+      $schoolDb = DatabaseManager::connect($databaseName);
+
+      // EXACT LEFT JOIN query
+      $studentRecord = $schoolDb
+        ->table('student_records')
+        ->where('user_id', $user->user_id)
+        ->where('school_code', $schoolCode)
+        ->first();
+
+      if ($studentRecord) {
+        $studentFullname = $studentRecord->fullname;
+        $studentSchoolName = $studentRecord->school_name;
+      }
+
+      DatabaseManager::disconnect($databaseName);
+
+    } catch (\Exception $e) {
+      \Log::error('Failed to fetch student record: ' . $e->getMessage());
+    }
+
+    // Return the combined data (prioritize student_records data)
     return response()->json([
       'success' => true,
       'data' => [
         'email' => $user->email ?? '',
+        'fullname' => $studentFullname ?? $user->fullname ?? $user->username,
+        'school_name' => $studentSchoolName ?? '',
         'has_email' => !empty($user->email),
       ],
     ], 200);
@@ -86,22 +134,19 @@ class AuthenticationController extends Controller
 
   /**
    * Authenticate user and return JWT token
-   * 
-   * @param Request $request Contains username and password
-   * @return \Illuminate\Http\JsonResponse Login response with token or redirect instructions
    */
   public function login(Request $request)
   {
-    // Validate incoming request parameters
     $request->validate([
       'username' => 'required|string',
       'password' => 'required|string',
     ]);
 
-    // Create rate limiting key combining username and IP address
-    $rateLimitKey = 'login:' . strtolower($request->username) . '|' . $request->ip();
+    $username = $request->username;
+    $password = $request->password;
 
-    // Check if user has exceeded login attempts
+    $rateLimitKey = 'login:' . strtolower($username) . '|' . $request->ip();
+
     if (RateLimiter::tooManyAttempts($rateLimitKey, 5)) {
       $retryAfterSeconds = RateLimiter::availableIn($rateLimitKey);
       return response()->json([
@@ -109,121 +154,79 @@ class AuthenticationController extends Controller
       ], 429);
     }
 
-    // Fetch user from the central users_main database
-    $userRecord = DB::connection('users_main')
+    // Find ALL users with this username
+    $users = DB::connection('users_main')
       ->table('users')
-      ->where('username', $request->username)
-      ->first();
+      ->where('username', $username)
+      ->get();
 
-    // If user doesn't exist, increment rate limiter and return error
+    if ($users->isEmpty()) {
+      RateLimiter::hit($rateLimitKey, 60);
+      return response()->json(['message' => 'Invalid username or password.'], 401);
+    }
+
+    // Try each user until password matches
+    $userRecord = null;
+    foreach ($users as $user) {
+      $passwordValid = false;
+
+      if (empty($user->password) || $user->password === null || trim($user->password) === '') {
+        $passwordValid = empty($password) || trim($password) === '';
+      } else if (preg_match('/^\$2[ayb]\$.{56}$/', $user->password)) {
+        $passwordValid = Hash::check($password, $user->password);
+      } else {
+        $passwordValid = ($password === $user->password);
+      }
+
+      if ($passwordValid) {
+        $userRecord = $user;
+        break;
+      }
+    }
+
     if (!$userRecord) {
       RateLimiter::hit($rateLimitKey, 60);
-      return response()->json([
-        'message' => 'Invalid username or password.',
-      ], 401);
+      return response()->json(['message' => 'Invalid username or password.'], 401);
     }
 
-    // Password validation with three scenarios: empty, bcrypt hash, or plain text
-    $isPasswordValid = false;
-
-    // Scenario 1: Password field is empty/null in database
-    if (empty($userRecord->password) || $userRecord->password === null || trim($userRecord->password) === '') {
-      if (empty($request->password) || trim($request->password) === '') {
-        $isPasswordValid = true;
-      }
-    }
-    // Scenario 2: Password is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-    else if (preg_match('/^\$2[ayb]\$.{56}$/', $userRecord->password)) {
-      if (Hash::check($request->password, $userRecord->password)) {
-        $isPasswordValid = true;
-      }
-    }
-    // Scenario 3: Password is stored as plain text (legacy support)
-    else {
-      if ($request->password === $userRecord->password) {
-        $isPasswordValid = true;
-      }
-    }
-
-    // If password validation fails, increment rate limiter and return error
-    if (!$isPasswordValid) {
-      RateLimiter::hit($rateLimitKey, 60);
-      return response()->json([
-        'message' => 'Invalid username or password.',
-      ], 401);
-    }
-
-    // Check if user account is active
     if ($userRecord->account_status !== 'active') {
-      return response()->json([
-        'message' => 'Your account has been deactivated',
-      ], 403);
+      return response()->json(['message' => 'Your account has been deactivated'], 403);
     }
 
-    // Clear rate limiter on successful authentication attempt
     RateLimiter::clear($rateLimitKey);
 
-    // Initialize variables for student data
     $studentFullName = null;
     $studentNickName = null;
-    $detectedSchoolCode = null;
 
-    // First priority: Get school code from user record
-    $detectedSchoolCode = $userRecord->school_code ?? null;
+    // ✅ FIX: Use uppercase for school_code
+    $detectedSchoolCode = strtoupper($userRecord->school_code ?? '');
 
-    // If no school code in database, extract from username or user_id
-    if (!$detectedSchoolCode) {
-      // Pattern: schoolcode_username (e.g., wlkae_sagara_kyosuke)
-      if (preg_match('/^([a-z]{2,5})_/i', $userRecord->username ?? '', $schoolCodeMatches)) {
-        $detectedSchoolCode = strtolower($schoolCodeMatches[1]);
-      }
-      // Alternative: Extract from beginning of user_id
-      else if (preg_match('/^([a-z]{2,5})/i', $userRecord->user_id ?? '', $schoolCodeMatches)) {
-        $detectedSchoolCode = strtolower($schoolCodeMatches[1]);
-      }
-    } else {
-      $detectedSchoolCode = strtolower(trim($detectedSchoolCode));
-    }
-
-    // If school code is found, fetch student profile from school database
     if ($detectedSchoolCode) {
       try {
-        // Generate appropriate database name based on environment
         $targetDatabaseName = DatabaseManager::generateDatabaseName($detectedSchoolCode);
-
-        // Connect to the school-specific database
         $schoolDatabaseConnection = DatabaseManager::connect($targetDatabaseName);
 
-        // Retrieve student record including fullname and nickname
         $studentProfile = $schoolDatabaseConnection
           ->table('student_records')
           ->where('user_id', $userRecord->user_id)
+          ->where('school_code', $detectedSchoolCode)
           ->first();
 
-        // If student record exists, extract the data
         if ($studentProfile) {
           $studentFullName = $studentProfile->fullname;
-          $studentNickName = $studentProfile->nickname ?? ''; // Use empty string if null
+          $studentNickName = $studentProfile->nickname ?? '';
         }
 
-        // Clean up database connection
         DatabaseManager::disconnect($targetDatabaseName);
 
       } catch (\Exception $databaseException) {
-        // Log error but don't fail login - student data is optional
-        \Log::error('School database connection failed:', [
-          'error' => $databaseException->getMessage(),
-          'school_code' => $detectedSchoolCode,
-          'user_id' => $userRecord->user_id
-        ]);
+        \Log::error('School database connection failed: ' . $databaseException->getMessage());
       }
     }
 
-    // Determine final display name and nickname (student data takes priority)
     $displayFullName = $studentFullName ?? $userRecord->fullname ?? $userRecord->username;
     $displayNickname = $studentNickName ?? $userRecord->nickname ?? '';
 
-    // Prepare user data for response
     $userResponseData = [
       'user_id' => $userRecord->user_id,
       'full_name' => $displayFullName,
@@ -232,41 +235,45 @@ class AuthenticationController extends Controller
       'email' => $userRecord->email,
       'name' => $userRecord->name ?? $userRecord->username,
       'account_status' => $userRecord->account_status,
+      'school_code' => $detectedSchoolCode,
     ];
 
-    // First-time user flow: If email is not verified or empty, redirect to email verification
+    // First-time user flow
     if (empty($userRecord->email_verified_at) || trim($userRecord->email_verified_at) === '') {
-
       return response()->json([
         'success' => true,
         'redirect_to' => '/first-user',
         'message' => 'Please verify your email',
         'user' => $userResponseData,
         'requires_email' => true,
-        // 'first_user_token' => $firstUserAuthToken,
       ], 200);
     }
 
-    // Regular user flow: Generate authentication token
-    $userModelInstance = User::on('users_main')->find($userRecord->user_id);
-    $userModelInstance->tokens()->delete(); // Remove existing tokens
+    // ✅ FIX: Create token for the EXACT user using id
+    $userModelInstance = User::on('users_main')
+      ->where('id', $userRecord->id)
+      ->first();
+
+    if (!$userModelInstance) {
+      return response()->json(['message' => 'User not found'], 401);
+    }
+
+    $userModelInstance->tokens()->delete();
     $authToken = $userModelInstance->createToken('auth_token')->plainTextToken;
 
-    // Update last successful login time
     $currentTimestamp = Carbon::now();
     DB::connection('users_main')
       ->table('users')
-      ->where('user_id', $userRecord->user_id)
+      ->where('id', $userRecord->id)
       ->update([
         'last_successfull_login' => $currentTimestamp,
-        'updated_at' => DB::raw('updated_at') // Preserve original timestamp
+        'updated_at' => DB::raw('updated_at')
       ]);
 
-    // Return successful login response with token
     return response()->json([
       'success' => true,
       'redirect_to' => '/',
-      'school_code' => $detectedSchoolCode ?? null,
+      'school_code' => $detectedSchoolCode,
       'message' => 'Login successful.',
       'user' => $userResponseData,
       'token' => $authToken,
