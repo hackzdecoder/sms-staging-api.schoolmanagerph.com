@@ -301,18 +301,18 @@ class OtpController extends Controller
     }
 
     // Check if email already exists for other users
-    $emailExists = User::where('email', $request->email)
-      ->where('username', '!=', $request->username)
-      ->exists();
+    // $emailExists = User::where('email', $request->email)
+    //   ->where('username', '!=', $request->username)
+    //   ->exists();
 
-    if ($emailExists) {
-      return response()->json([
-        'success' => false,
-        'status' => 422,
-        'message' => 'Email already registered by another user.',
-        'errors' => ['email' => ['Email already registered by another user.']],
-      ], 422);
-    }
+    // if ($emailExists) {
+    //   return response()->json([
+    //     'success' => false,
+    //     'status' => 422,
+    //     'message' => 'Email already registered by another user.',
+    //     'errors' => ['email' => ['Email already registered by another user.']],
+    //   ], 422);
+    // }
 
     // Temporarily update email for OTP sending
     $originalEmail = $user->email;
@@ -385,7 +385,7 @@ class OtpController extends Controller
     return response()->json([
       'success' => true,
       'status' => 200,
-      'message' => 'OTP has been sent to your email for registration.',
+      'message' => 'OTP has been sent to ' . substr($tempEmail, 0, 3) . '****' . strstr($tempEmail, '@'),
       'data' => [
         'email_hint' => substr($tempEmail, 0, 3) . '****' . strstr($tempEmail, '@'),
       ],
