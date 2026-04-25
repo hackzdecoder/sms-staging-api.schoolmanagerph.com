@@ -5,27 +5,39 @@ namespace App\Http\Controllers\api\attendance;
 use App\Http\Controllers\Controller;
 use App\Helpers\DatabaseManager;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class AttendanceController extends Controller
 {
-  protected string $usersConnectionName = 'users_main'; // KEEP THIS
+  protected string $usersConnectionName = 'users_main';
 
   // -------------------- Get Attendance Data --------------------
   public function attendance(Request $request)
   {
     try {
-      // Get user_id from authenticated user
-      $userId = auth()->user()->user_id;
+      $authUser = auth()->user();
 
-      if (!$userId) {
+      if (!$authUser) {
         return response()->json([
           'success' => false,
           'message' => 'User not authenticated'
         ], 401);
       }
 
-      // DYNAMIC CONNECTION: DatabaseManager auto-detects school
-      $schoolDb = DatabaseManager::connect();
+      $userId = $authUser->user_id;
+      $schoolCode = $authUser->school_code;
+
+      if (!$schoolCode) {
+        return response()->json([
+          'success' => false,
+          'message' => 'School code not found'
+        ], 400);
+      }
+
+      // ✅ Connect to correct school database
+      $databaseName = DatabaseManager::generateDatabaseName($schoolCode);
+      $schoolDb = DatabaseManager::connect($databaseName);
+
       $query = $schoolDb
         ->table('attendance_records as a')
         ->join('student_records as s', 'a.user_id', '=', 's.user_id')
@@ -34,7 +46,8 @@ class AttendanceController extends Controller
           'a.full_name as student_name',
           's.nickname as student_nickname'
         )
-        ->where('a.user_id', $userId);
+        ->where('a.user_id', $userId)
+        ->where('a.school_code', $schoolCode);  // ✅ ADD school_code
 
       // Filter by dates
       if ($request->has('startDate') && $request->startDate) {
@@ -44,14 +57,12 @@ class AttendanceController extends Controller
         $query->where('a.date', '<=', $request->endDate);
       }
 
-      // Order by id DESC
       $data = $query
         ->orderBy('a.id', 'desc')
         ->orderBy('a.created_at', 'desc')
         ->get();
 
-      // Disconnect
-      DatabaseManager::disconnect();
+      DatabaseManager::disconnect($databaseName);
 
       return response()->json([
         'success' => true,
@@ -70,7 +81,6 @@ class AttendanceController extends Controller
   public function getAttendanceUsers(Request $request)
   {
     try {
-      // Get authenticated user
       $authUser = auth()->user();
 
       if (!$authUser) {
@@ -78,9 +88,18 @@ class AttendanceController extends Controller
       }
 
       $currentUserId = $authUser->user_id;
+      $schoolCode = $authUser->school_code;
 
-      // DYNAMIC CONNECTION: DatabaseManager auto-detects school
-      $schoolDb = DatabaseManager::connect();
+      if (!$schoolCode) {
+        return response()->json([
+          'success' => false,
+          'message' => 'School code not found'
+        ], 400);
+      }
+
+      $databaseName = DatabaseManager::generateDatabaseName($schoolCode);
+      $schoolDb = DatabaseManager::connect($databaseName);
+
       $query = $schoolDb
         ->table('attendance_records as ar')
         ->join('student_records as s', 'ar.user_id', '=', 's.user_id')
@@ -89,20 +108,19 @@ class AttendanceController extends Controller
           's.fullname as username',
           's.fullname as account_owner',
           'ar.full_name as person_name',
-          \Illuminate\Support\Facades\DB::raw('COUNT(*) as times_recorded'),
-          \Illuminate\Support\Facades\DB::raw('MIN(ar.date) as first_date'),
-          \Illuminate\Support\Facades\DB::raw('MAX(ar.date) as last_date'),
-          \Illuminate\Support\Facades\DB::raw("GROUP_CONCAT(DISTINCT DATE(ar.date) ORDER BY ar.date SEPARATOR ', ') as dates_list")
+          DB::raw('COUNT(*) as times_recorded'),
+          DB::raw('MIN(ar.date) as first_date'),
+          DB::raw('MAX(ar.date) as last_date'),
+          DB::raw("GROUP_CONCAT(DISTINCT DATE(ar.date) ORDER BY ar.date SEPARATOR ', ') as dates_list")
         )
         ->where('ar.user_id', $currentUserId)
+        ->where('ar.school_code', $schoolCode)  // ✅ ADD school_code
         ->groupBy('ar.user_id', 's.fullname', 'ar.full_name')
         ->orderBy('s.fullname', 'ASC');
 
-      // Execute the query
       $attendanceDetails = $query->get();
 
-      // Disconnect
-      DatabaseManager::disconnect();
+      DatabaseManager::disconnect($databaseName);
 
       if ($attendanceDetails->isEmpty()) {
         return response()->json([
@@ -111,7 +129,6 @@ class AttendanceController extends Controller
         ]);
       }
 
-      // Format response to match frontend EXACTLY
       $result = [];
       foreach ($attendanceDetails as $record) {
         $result[] = [
@@ -151,28 +168,38 @@ class AttendanceController extends Controller
     return $this->markAsRead();
   }
 
-  // -------------------- Helper (Same structure as MessagesController) --------------------
+  // -------------------- Helper with school_code filter --------------------
   protected function markAsRead($recordId = null)
   {
     try {
-      // Get user_id from auth
-      $userId = auth()->user()->user_id;
+      $authUser = auth()->user();
 
-      if (!$userId) {
+      if (!$authUser) {
         return response()->json([
           'success' => false,
-          'message' => "user_id is required"
+          'message' => "User not authenticated"
+        ], 401);
+      }
+
+      $userId = $authUser->user_id;
+      $schoolCode = $authUser->school_code;
+
+      if (!$schoolCode) {
+        return response()->json([
+          'success' => false,
+          'message' => "School code not found"
         ], 400);
       }
 
-      // DYNAMIC CONNECTION: DatabaseManager auto-detects school
-      $schoolDb = DatabaseManager::connect();
+      $databaseName = DatabaseManager::generateDatabaseName($schoolCode);
+      $schoolDb = DatabaseManager::connect($databaseName);
+
       $query = $schoolDb
         ->table('attendance_records')
-        ->where('user_id', $userId);
+        ->where('user_id', $userId)
+        ->where('school_code', $schoolCode);  // ✅ ADD school_code
 
       if ($recordId) {
-        // Mark only this user's specific record
         $updated = $query
           ->where('id', $recordId)
           ->update([
@@ -180,8 +207,7 @@ class AttendanceController extends Controller
             'updated_at' => now()
           ]);
 
-        // Disconnect
-        DatabaseManager::disconnect();
+        DatabaseManager::disconnect($databaseName);
 
         return response()->json([
           'success' => (bool) $updated,
@@ -190,7 +216,6 @@ class AttendanceController extends Controller
             : 'Record not found or not owned by user'
         ]);
       } else {
-        // Mark ALL unread records for THIS USER only
         $updated = $query
           ->where('status', 'unread')
           ->update([
@@ -198,8 +223,7 @@ class AttendanceController extends Controller
             'updated_at' => now()
           ]);
 
-        // Disconnect
-        DatabaseManager::disconnect();
+        DatabaseManager::disconnect($databaseName);
 
         return response()->json([
           'success' => true,
