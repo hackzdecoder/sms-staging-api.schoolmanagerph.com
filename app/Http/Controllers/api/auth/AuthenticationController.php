@@ -401,7 +401,6 @@ class AuthenticationController extends Controller
       'first_user_token' => 'required|string',
     ]);
 
-    // Get connection to users_main database
     try {
       $usersMainConnection = DatabaseManager::connect('users_main');
     } catch (\Exception $connectionError) {
@@ -411,7 +410,6 @@ class AuthenticationController extends Controller
       ], 500);
     }
 
-    // Verify token and user combination
     $userToUpdate = $usersMainConnection
       ->table('users')
       ->where('username', $request->username)
@@ -426,7 +424,6 @@ class AuthenticationController extends Controller
       ], 401);
     }
 
-    // Check if token has expired
     if (Carbon::now()->gt($userToUpdate->first_user_token_expiry_at)) {
       DatabaseManager::disconnect('users_main');
       return response()->json([
@@ -435,23 +432,8 @@ class AuthenticationController extends Controller
       ], 410);
     }
 
-    // Verify email is not already taken by another user
-    $emailAlreadyExists = $usersMainConnection
-      ->table('users')
-      ->where('email', $request->email)
-      ->where('user_id', '!=', $userToUpdate->user_id)
-      ->exists();
+    // ✅ Allow same email across different schools - removed check
 
-    if ($emailAlreadyExists) {
-      DatabaseManager::disconnect('users_main');
-      return response()->json([
-        'success' => false,
-        'message' => 'Invalid email, Please try another email',
-        'errors' => ['email' => ['Invalid email, Please try another email']],
-      ], 422);
-    }
-
-    // Prepare update data
     $updatePayload = [
       'email' => $request->email,
       'terms_policy_date' => Carbon::now(),
@@ -464,40 +446,44 @@ class AuthenticationController extends Controller
       'updated_at' => Carbon::now(),
     ];
 
-    // Include password if provided
     if ($request->password) {
       $updatePayload['password'] = Hash::make($request->password);
       $updatePayload['password_update_by'] = 1;
     }
 
-    // Set creation timestamp if missing
     if (!$userToUpdate->created_at) {
       $updatePayload['created_at'] = Carbon::now();
     }
 
-    // Set email verification timestamp if missing
     if (!$userToUpdate->email_verified_at) {
       $updatePayload['email_verified_at'] = Carbon::now();
     }
 
-    // Execute update
     $usersMainConnection
       ->table('users')
       ->where('user_id', $userToUpdate->user_id)
       ->update($updatePayload);
 
-    // Create authentication token for the user
-    $updatedUserModel = User::on('users_main')->find($userToUpdate->user_id);
+    // ✅ FIXED: Use 'id', not 'user_id'
+    $updatedUserModel = User::on('users_main')->find($userToUpdate->id);
+
+    if (!$updatedUserModel) {
+      DatabaseManager::disconnect('users_main');
+      return response()->json([
+        'success' => false,
+        'message' => 'User not found after update.'
+      ], 500);
+    }
+
     $newAuthToken = $updatedUserModel->createToken('auth_token')->plainTextToken;
 
-    // Clean up database connection
     DatabaseManager::disconnect('users_main');
 
     return response()->json([
       'success' => true,
       'message' => 'User info updated successfully.',
       'token' => $newAuthToken,
-    ]);
+    ], 200);
   }
 
   /**

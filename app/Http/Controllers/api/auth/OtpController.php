@@ -24,6 +24,7 @@ class OtpController extends Controller
   {
     $validator = Validator::make($request->all(), [
       'username' => 'required|exists:users,username',
+      'school_code' => 'nullable|string',
     ], [
       'username.required' => 'Username is required.',
       'username.exists' => 'Username not found.',
@@ -38,7 +39,21 @@ class OtpController extends Controller
       ], 422);
     }
 
-    $user = User::where('username', $request->username)->first();
+    $query = User::where('username', $request->username);
+
+    if ($request->has('school_code') && !empty($request->school_code)) {
+      $query->where('school_code', $request->school_code);
+    }
+
+    $user = $query->first();
+
+    if (!$user) {
+      return response()->json([
+        'success' => false,
+        'status' => 404,
+        'message' => 'User not found.',
+      ], 404);
+    }
 
     // Check if account is active
     if ($user->account_status !== 'active') {
@@ -74,7 +89,7 @@ class OtpController extends Controller
         ->select('company_name')
         ->first();
 
-      return $company->company_name;
+      return $company->company_name ?? 'TaparSoft Enterprise';
     } catch (\Exception $e) {
       return 'TaparSoft Enterprise';
     }
@@ -85,60 +100,28 @@ class OtpController extends Controller
    */
   private function getUserFullName($user): string
   {
-    // Default fallback to username
     $fullName = $user->username;
-
-    // Get school code from user record
     $schoolCode = $user->school_code ?? null;
 
-    // If no school code in database, extract from username or user_id
-    if (!$schoolCode) {
-      // Pattern: schoolcode_username (e.g., wlkae_sagara_kyosuke)
-      if (preg_match('/^([a-z]{2,5})_/i', $user->username ?? '', $schoolCodeMatches)) {
-        $schoolCode = strtolower($schoolCodeMatches[1]);
-      }
-      // Alternative: Extract from beginning of user_id
-      else if (preg_match('/^([a-z]{2,5})/i', $user->user_id ?? '', $schoolCodeMatches)) {
-        $schoolCode = strtolower($schoolCodeMatches[1]);
-      }
-    } else {
-      $schoolCode = strtolower(trim($schoolCode));
-    }
-
-    // If school code is found, try to fetch student profile
     if ($schoolCode) {
       try {
-        // Generate appropriate database name based on environment
         $targetDatabaseName = DatabaseManager::generateDatabaseName($schoolCode);
-
-        // Connect to the school-specific database
         $schoolDatabaseConnection = DatabaseManager::connect($targetDatabaseName);
 
-        // Retrieve student record including fullname
         $studentProfile = $schoolDatabaseConnection
           ->table('student_records')
           ->where('user_id', $user->user_id)
           ->first();
 
-        // If student record exists, extract the full name
         if ($studentProfile) {
-          // Try multiple possible column names for full name
           if (isset($studentProfile->fullname) && !empty($studentProfile->fullname)) {
             $fullName = $studentProfile->fullname;
-          } elseif (isset($studentProfile->full_name) && !empty($studentProfile->full_name)) {
-            $fullName = $studentProfile->full_name;
-          } elseif (isset($studentProfile->name) && !empty($studentProfile->name)) {
-            $fullName = $studentProfile->name;
-          } elseif (isset($studentProfile->student_name) && !empty($studentProfile->student_name)) {
-            $fullName = $studentProfile->student_name;
           }
         }
 
-        // Clean up database connection
         DatabaseManager::disconnect($targetDatabaseName);
 
       } catch (\Exception $e) {
-        // Keep the default username fallback
         $fullName = $user->username;
       }
     }
@@ -156,16 +139,18 @@ class OtpController extends Controller
     $request->merge([
       'otp_code' => trim($request->otp_code),
       'username' => trim($request->username),
+      'school_code' => trim($request->school_code ?? ''),
     ]);
 
     $validator = Validator::make($request->all(), [
       'otp_code' => 'required|digits:6',
-      'username' => 'required|exists:users,username',
+      'username' => 'required',
+      'school_code' => 'required|string',
     ], [
       'otp_code.required' => 'OTP code is required.',
       'otp_code.digits' => 'OTP code must be 6 digits.',
       'username.required' => 'Username is required.',
-      'username.exists' => 'Username not found.',
+      'school_code.required' => 'School code is required.',
     ]);
 
     if ($validator->fails()) {
@@ -177,7 +162,9 @@ class OtpController extends Controller
       ], 422);
     }
 
+    // ✅ Find user with BOTH username AND school_code AND otp_code
     $user = User::where('username', $request->username)
+      ->where('school_code', $request->school_code)
       ->where('otp_code', $request->otp_code)
       ->first();
 
@@ -185,8 +172,17 @@ class OtpController extends Controller
       return response()->json([
         'success' => false,
         'status' => 401,
-        'message' => 'Invalid OTP code.',
+        'message' => 'Invalid OTP code or user not found for this school.',
       ], 401);
+    }
+
+    // Check if OTP has expired
+    if (Carbon::now()->gt($user->otp_code_expired_at)) {
+      return response()->json([
+        'success' => false,
+        'status' => 410,
+        'message' => 'OTP has expired. Please request a new OTP.',
+      ], 410);
     }
 
     // Check if account is active
@@ -226,7 +222,7 @@ class OtpController extends Controller
         'data' => [
           'username' => $user->username,
           'email' => $user->email,
-          'email_hint' => substr($user->email, 0, 3) . '****' . strstr($user->email, '@'),
+          'email_hint' => $user->email ? substr($user->email, 0, 3) . '****' . strstr($user->email, '@') : null,
           'first_user_token' => $firstUserToken,
           'first_user_token_expiry_at' => $tokenExpiry->toDateTimeString(),
         ],
@@ -252,7 +248,7 @@ class OtpController extends Controller
         'message' => 'OTP verified successfully. You can now reset your password.',
         'data' => [
           'username' => $user->username,
-          'email_hint' => substr($user->email, 0, 3) . '****' . strstr($user->email, '@'),
+          'email_hint' => $user->email ? substr($user->email, 0, 3) . '****' . strstr($user->email, '@') : null,
           'reset_token' => $resetToken,
         ],
       ], 200);
@@ -267,16 +263,18 @@ class OtpController extends Controller
     $request->merge([
       'username' => trim($request->username),
       'email' => trim($request->email),
+      'school_code' => trim($request->school_code ?? ''),
     ]);
 
     $validator = Validator::make($request->all(), [
-      'username' => 'required|exists:users,username',
+      'username' => 'required',
       'email' => 'required|email',
+      'school_code' => 'required|string',
     ], [
       'username.required' => 'Username is required.',
-      'username.exists' => 'Username not found.',
       'email.required' => 'Email is required.',
       'email.email' => 'Invalid email format.',
+      'school_code.required' => 'School code is required.',
     ]);
 
     if ($validator->fails()) {
@@ -288,7 +286,18 @@ class OtpController extends Controller
       ], 422);
     }
 
-    $user = User::where('username', $request->username)->first();
+    // ✅ Find user with BOTH username AND school_code
+    $user = User::where('username', $request->username)
+      ->where('school_code', $request->school_code)
+      ->first();
+
+    if (!$user) {
+      return response()->json([
+        'success' => false,
+        'status' => 404,
+        'message' => 'User not found for this school.',
+      ], 404);
+    }
 
     // Check if account is active
     if ($user->account_status !== 'active') {
@@ -300,20 +309,6 @@ class OtpController extends Controller
       ], 403);
     }
 
-    // Check if email already exists for other users
-    // $emailExists = User::where('email', $request->email)
-    //   ->where('username', '!=', $request->username)
-    //   ->exists();
-
-    // if ($emailExists) {
-    //   return response()->json([
-    //     'success' => false,
-    //     'status' => 422,
-    //     'message' => 'Email already registered by another user.',
-    //     'errors' => ['email' => ['Email already registered by another user.']],
-    //   ], 422);
-    // }
-
     // Temporarily update email for OTP sending
     $originalEmail = $user->email;
     $tempEmail = $request->email;
@@ -321,41 +316,35 @@ class OtpController extends Controller
     // Generate new OTP
     $newOtp = rand(100000, 999999);
 
-    // Use DB to avoid updating updated_at
     DB::table('users')
       ->where('id', $user->id)
       ->update([
         'otp_code' => $newOtp,
         'otp_verified_at' => null,
-        'otp_code_expired_at' => Carbon::now()->addMinutes(5)->addSeconds(10),
+        'otp_code_expired_at' => Carbon::now()->addMinutes(5),
         'email' => $tempEmail,
         'updated_at' => DB::raw('updated_at'),
       ]);
 
-    // Get company name from trademarks database
     $companyName = $this->getCompanyName();
-
-    // Get user's full name
     $fullName = $this->getUserFullName($user);
 
-    // Email content for REGISTRATION with full name
     $otpBody = <<<TXT
             Hello {$fullName},
 
             Your One-Time Password (OTP) for Email Registration is: {$newOtp}
 
-            ***Please do not reply to this email. This is an automated confirmation that we have received your request for email registration.***
+            ***Please do not reply to this email.***
 
-            This e-mail transmission is intended only for the addressee and may contain confidential information. Confidentiality is not waived if you are not the intended recipient of this e-mail, nor may you use, review, disclose, disseminate or copy any information contained in or attached to it. If you received this e-mail in error please delete it and any attachments and notify us immediately by reply e-mail. {$companyName} does not warrant that any attachments are free from viruses or other defects. You assume all liability for any loss, damage or other consequences which may arise from opening or using the attachments.
+            This e-mail transmission is intended only for the addressee and may contain confidential information.
         TXT;
 
     try {
-      Mail::raw($otpBody, function ($message) use ($tempEmail, $user) {
+      Mail::raw($otpBody, function ($message) use ($tempEmail) {
         $message->to($tempEmail)
           ->subject('Email Registration OTP');
       });
 
-      // Restore original email after sending (if it was empty)
       if (empty($originalEmail)) {
         DB::table('users')
           ->where('id', $user->id)
@@ -366,7 +355,6 @@ class OtpController extends Controller
       }
 
     } catch (\Exception $e) {
-      // Restore email on error
       DB::table('users')
         ->where('id', $user->id)
         ->update([
@@ -378,7 +366,6 @@ class OtpController extends Controller
         'success' => false,
         'status' => 500,
         'message' => 'Failed to send OTP email.',
-        'error' => $e->getMessage(),
       ], 500);
     }
 
@@ -397,13 +384,17 @@ class OtpController extends Controller
    */
   public function resendOtp(Request $request)
   {
-    $request->merge(['username' => trim($request->username)]);
+    $request->merge([
+      'username' => trim($request->username),
+      'school_code' => trim($request->school_code ?? ''),
+    ]);
 
     $validator = Validator::make($request->all(), [
-      'username' => 'required|exists:users,username',
+      'username' => 'required',
+      'school_code' => 'required|string',
     ], [
       'username.required' => 'Username is required.',
-      'username.exists' => 'Username not found.',
+      'school_code.required' => 'School code is required.',
     ]);
 
     if ($validator->fails()) {
@@ -415,9 +406,19 @@ class OtpController extends Controller
       ], 422);
     }
 
-    $user = User::where('username', $request->username)->first();
+    // ✅ Find user with BOTH username AND school_code
+    $user = User::where('username', $request->username)
+      ->where('school_code', $request->school_code)
+      ->first();
 
-    // Check if account is active
+    if (!$user) {
+      return response()->json([
+        'success' => false,
+        'status' => 404,
+        'message' => 'User not found for this school.',
+      ], 404);
+    }
+
     if ($user->account_status !== 'active') {
       return response()->json([
         'success' => false,
@@ -427,23 +428,18 @@ class OtpController extends Controller
       ], 403);
     }
 
-    // Generate new OTP first
     $newOtp = rand(100000, 999999);
 
-    // Use DB to avoid updating updated_at
     DB::table('users')
       ->where('id', $user->id)
       ->update([
         'otp_code' => $newOtp,
         'otp_verified_at' => null,
-        'otp_code_expired_at' => Carbon::now()->addMinutes(5)->addSeconds(10),
+        'otp_code_expired_at' => Carbon::now()->addMinutes(5),
         'updated_at' => DB::raw('updated_at'),
       ]);
 
-    // Get company name from trademarks database
     $companyName = $this->getCompanyName();
-
-    // Get user's full name
     $fullName = $this->getUserFullName($user);
 
     $otpBody = <<<TXT
@@ -453,9 +449,7 @@ class OtpController extends Controller
 
             It is valid for the next 5 minutes.
 
-            ***Please do not reply to this email. This is an automated confirmation that we have received your request for system password reset.***
-
-            This e-mail transmission is intended only for the addressee and may contain confidential information. Confidentiality is not waived if you are not the intended recipient of this e-mail, nor may you use, review, disclose, disseminate or copy any information contained in or attached to it. If you received this e-mail in error please delete it and any attachments and notify us immediately by reply e-mail. {$companyName} does not warrant that any attachments are free from viruses or other defects. You assume all liability for any loss, damage or other consequences which may arise from opening or using the attachments.
+            ***Please do not reply to this email.***
         TXT;
 
     try {
@@ -468,7 +462,6 @@ class OtpController extends Controller
         'success' => false,
         'status' => 500,
         'message' => 'Failed to send OTP email.',
-        'error' => $e->getMessage(),
       ], 500);
     }
 
@@ -477,7 +470,7 @@ class OtpController extends Controller
       'status' => 200,
       'message' => 'A new OTP has been sent to your email.',
       'data' => [
-        'email_hint' => substr($user->email, 0, 3) . '****' . strstr($user->email, '@'),
+        'email_hint' => $user->email ? substr($user->email, 0, 3) . '****' . strstr($user->email, '@') : null,
       ],
     ], 200);
   }
