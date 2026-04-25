@@ -21,8 +21,7 @@ return [
 
   'allowed_origins' => [
     'http://localhost:3039',
-    // 'https://idrs.schoolmanagerph.com',
-    // 'https://idrs-staging.schoolmanagerph.com'
+    'https://sms-staging.schoolmanagerph.com',
   ],
 
   'allowed_origins_patterns' => [],
