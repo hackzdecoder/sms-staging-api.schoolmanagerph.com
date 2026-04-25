@@ -432,8 +432,6 @@ class AuthenticationController extends Controller
       ], 410);
     }
 
-    // ✅ Allow same email across different schools - removed check
-
     $updatePayload = [
       'email' => $request->email,
       'terms_policy_date' => Carbon::now(),
@@ -459,12 +457,13 @@ class AuthenticationController extends Controller
       $updatePayload['email_verified_at'] = Carbon::now();
     }
 
+    // ✅ FIXED: Update with BOTH user_id AND school_code
     $usersMainConnection
       ->table('users')
       ->where('user_id', $userToUpdate->user_id)
+      ->where('school_code', $userToUpdate->school_code)
       ->update($updatePayload);
 
-    // ✅ FIXED: Use 'id', not 'user_id'
     $updatedUserModel = User::on('users_main')->find($userToUpdate->id);
 
     if (!$updatedUserModel) {
